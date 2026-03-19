@@ -70,7 +70,8 @@ const TOPICS = [
 interface VocabularyItem {
   word: string;
   definition: string;
-  sentence: string;
+  sentence?: string;
+  example?: string;
 }
 
 interface LearningExercise {
@@ -651,9 +652,11 @@ export default function FluentFlowApp() {
                               </button>
                             </div>
                             <p className="text-sm text-slate-600 mb-3 font-medium">{item.definition}</p>
-                            <div className="bg-slate-50 p-3 rounded-lg border-l-4 border-indigo-400">
-                              <p className="text-xs text-slate-500 italic">&quot;{item.sentence}&quot;</p>
-                            </div>
+                            {item.sentence && (
+                              <div className="bg-slate-50 p-3 rounded-lg border-l-4 border-indigo-400">
+                                <p className="text-xs text-slate-500 italic">&quot;{item.sentence}&quot;</p>
+                              </div>
+                            )}
                           </motion.div>
                         ))}
                       </div>
