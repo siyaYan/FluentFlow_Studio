@@ -23,6 +23,7 @@ import {
   GraduationCap,
   MessageSquareQuote,
   Loader2,
+  Shuffle,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -48,6 +49,21 @@ const LEVELS = [
   { id: 'B2', name: 'Upper-Intermediate', color: 'bg-indigo-100 text-indigo-700 border-indigo-200' },
   { id: 'C1', name: 'Advanced', color: 'bg-purple-100 text-purple-700 border-purple-200' },
   { id: 'C2', name: 'Proficient', color: 'bg-rose-100 text-rose-700 border-rose-200' },
+];
+
+const TOPICS = [
+  'Artificial Intelligence & Society',
+  'Climate Change & the Environment',
+  'Space Exploration',
+  'Ancient Civilizations',
+  'Psychology & Human Behavior',
+  'Global Economy & Trade',
+  'Nutrition & Health Science',
+  'Cultural Traditions Around the World',
+  'Marine Biology & Ocean Life',
+  'Renewable Energy & the Future',
+  'Philosophy & Critical Thinking',
+  'Architecture & Urban Design',
 ];
 
 // --- Types ---
@@ -142,6 +158,8 @@ export default function FluentFlowApp() {
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'input' | 'analysis' | 'practice'>('input');
+  const [isGeneratingMaterial, setIsGeneratingMaterial] = useState(false);
+  const [lastGeneratedTopic, setLastGeneratedTopic] = useState<string | null>(null);
 
   // Audio Refs
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -334,6 +352,37 @@ export default function FluentFlowApp() {
     }
   };
 
+  const handleGenerateMaterial = async () => {
+    const topic = TOPICS[Math.floor(Math.random() * TOPICS.length)];
+    const levelName = LEVELS.find((l) => l.id === selectedLevel)?.name;
+
+    setIsGeneratingMaterial(true);
+    setError(null);
+
+    try {
+      const res = await fetch('/api/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ topic, level: selectedLevel, levelName }),
+      });
+
+      if (!res.ok) {
+        const { error: msg } = await res.json();
+        throw new Error(msg || 'Generation failed.');
+      }
+
+      const { text } = await res.json();
+      setTextInput(text);
+      setLastGeneratedTopic(topic);
+      setAnalysisResult(null);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Failed to generate material.';
+      setError(message);
+    } finally {
+      setIsGeneratingMaterial(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-[#F8FAFC] text-[#1E293B] font-sans selection:bg-indigo-100 selection:text-indigo-900">
       {/* Header */}
@@ -387,12 +436,30 @@ export default function FluentFlowApp() {
                 className="space-y-6"
               >
                 <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4">
-                  <div className="flex items-center justify-between">
-                    <label className="text-sm font-semibold text-slate-700 flex items-center gap-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <label className="text-sm font-semibold text-slate-700 flex items-center gap-2 shrink-0">
                       <MessageSquareQuote className="w-4 h-4 text-indigo-500" />
                       Learning Material
                     </label>
-                    <span className="text-xs text-slate-400">{textInput.length} characters</span>
+                    <div className="flex items-center gap-2 min-w-0">
+                      {lastGeneratedTopic && !isGeneratingMaterial && (
+                        <span className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-50 border border-indigo-200 rounded-full text-[10px] font-bold text-indigo-600 uppercase tracking-wider truncate max-w-[180px]">
+                          {lastGeneratedTopic}
+                        </span>
+                      )}
+                      <button
+                        onClick={handleGenerateMaterial}
+                        disabled={isGeneratingMaterial || isGeneratingAudio || isAnalyzing}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border border-slate-200 text-slate-600 hover:border-indigo-400 hover:text-indigo-600 hover:bg-indigo-50 disabled:opacity-40 transition-all shrink-0"
+                        title="Generate random study material"
+                      >
+                        {isGeneratingMaterial
+                          ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          : <Shuffle className="w-3.5 h-3.5" />}
+                        Random Topic
+                      </button>
+                      <span className="text-xs text-slate-400 shrink-0">{textInput.length} chars</span>
+                    </div>
                   </div>
                   <textarea
                     value={textInput}
