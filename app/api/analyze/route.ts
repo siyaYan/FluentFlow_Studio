@@ -29,7 +29,7 @@ export async function POST(req: NextRequest) {
       ],
       config: {
         systemInstruction:
-          "You are a world-class English tutor. Analyze the text and provide a JSON response with: 'summary' (concise paragraph), 'vocabulary' (5-7 key words with word, definition, and example sentence), and 'learningExercises' (3 key takeaways, each with 3 comprehension/discussion questions). Ensure all content is perfectly tailored to the specified CEFR level.",
+          `You are a world-class English tutor. Analyze the text and provide a JSON response with: 'summary' (concise paragraph), 'vocabulary' (extract only the words from this text that would genuinely be unfamiliar or challenging for a ${level} (${levelName}) CEFR learner — skip words they would already know at that level; include as many or as few as the material actually warrants, up to a maximum of 50; each entry needs word, definition appropriate for ${level} level, and a short example sentence), and 'learningExercises' (3 key takeaways, each with 3 comprehension/discussion questions). All content must be perfectly tailored to the ${level} (${levelName}) CEFR level.`,
         responseMimeType: 'application/json',
       },
     });

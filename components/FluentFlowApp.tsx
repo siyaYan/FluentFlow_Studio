@@ -152,130 +152,101 @@ export default function FluentFlowApp() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
   const playbackSpeedRef = useRef(1);
-  const currentPosRef = useRef(0);
-  const lastRealTimeRef = useRef(0);
-  const [currentAudioBuffer, setCurrentAudioBuffer] = useState<AudioBuffer | null>(null);
+  const [audioDuration, setAudioDuration] = useState<number | null>(null);
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'input' | 'analysis' | 'practice'>('input');
   const [isGeneratingMaterial, setIsGeneratingMaterial] = useState(false);
   const [lastGeneratedTopic, setLastGeneratedTopic] = useState<string | null>(null);
 
-  // Audio Refs
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
-  const startTimeRef = useRef<number>(0);
+  // Audio Refs (main player — HTMLAudioElement for pitch-preserving speed control)
+  const audioElementRef = useRef<HTMLAudioElement | null>(null);
+  const audioBlobUrlRef = useRef<string | null>(null);
   const [audioProgress, setAudioProgress] = useState(0);
   const animationFrameRef = useRef<number | null>(null);
+
+  // Vocab pronunciation (separate context — never affects main player)
+  const vocabAudioContextRef = useRef<AudioContext | null>(null);
+  const vocabAudioSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const [loadingVocabWord, setLoadingVocabWord] = useState<string | null>(null);
+  const [playingVocabWord, setPlayingVocabWord] = useState<string | null>(null);
 
   // Cleanup
   useEffect(() => {
     return () => {
       if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
-      stopAudio();
+      if (audioElementRef.current) audioElementRef.current.pause();
+      if (audioBlobUrlRef.current) URL.revokeObjectURL(audioBlobUrlRef.current);
     };
   }, []);
 
   const stopAudio = useCallback((resetProgress = true) => {
-    if (audioSourceRef.current) {
-      try {
-        audioSourceRef.current.stop();
-      } catch {
-        // Ignore if already stopped
-      }
-      audioSourceRef.current = null;
+    if (audioElementRef.current) {
+      audioElementRef.current.pause();
+      if (resetProgress) audioElementRef.current.currentTime = 0;
     }
     setIsPlaying(false);
-    if (resetProgress) {
-      setAudioProgress(0);
-      startTimeRef.current = 0;
-    }
+    if (resetProgress) setAudioProgress(0);
     if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
   }, []);
 
-  const updateProgress = useCallback((duration: number) => {
-    if (!audioContextRef.current || !audioSourceRef.current) return;
-
-    const now = audioContextRef.current.currentTime;
-    const delta = now - lastRealTimeRef.current;
-    lastRealTimeRef.current = now;
-
-    currentPosRef.current += delta * playbackSpeedRef.current;
-    const progress = Math.min((currentPosRef.current / duration) * 100, 100);
-    setAudioProgress(progress);
-
-    if (progress < 100) {
-      animationFrameRef.current = requestAnimationFrame(() => updateProgress(duration));
-    }
+  const startProgressLoop = useCallback(() => {
+    if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+    const tick = () => {
+      const audio = audioElementRef.current;
+      if (!audio || audio.paused || audio.ended) return;
+      if (audio.duration > 0) setAudioProgress((audio.currentTime / audio.duration) * 100);
+      animationFrameRef.current = requestAnimationFrame(tick);
+    };
+    animationFrameRef.current = requestAnimationFrame(tick);
   }, []);
-
-  const playAudioFromOffset = useCallback(
-    async (buffer: AudioBuffer, offset: number) => {
-      stopAudio(false);
-
-      if (!audioContextRef.current) {
-        audioContextRef.current = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
-      }
-
-      const ctx = audioContextRef.current;
-      await ctx.resume();
-
-      const source = ctx.createBufferSource();
-      source.buffer = buffer;
-      source.playbackRate.value = playbackSpeed;
-      source.connect(ctx.destination);
-
-      lastRealTimeRef.current = ctx.currentTime;
-      currentPosRef.current = offset;
-      source.start(0, offset);
-      audioSourceRef.current = source;
-      setIsPlaying(true);
-
-      updateProgress(buffer.duration);
-
-      source.onended = () => {
-        if (audioSourceRef.current === source) {
-          setIsPlaying(false);
-          setAudioProgress(0);
-        }
-      };
-    },
-    [stopAudio, updateProgress, playbackSpeed]
-  );
 
   const playAudio = useCallback(
     async (blob: Blob) => {
-      if (!audioContextRef.current) {
-        audioContextRef.current = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
-      }
+      stopAudio();
+      if (audioBlobUrlRef.current) URL.revokeObjectURL(audioBlobUrlRef.current);
 
-      const ctx = audioContextRef.current;
-      const arrayBuffer = await blob.arrayBuffer();
-      const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+      const url = URL.createObjectURL(blob);
+      audioBlobUrlRef.current = url;
 
-      setCurrentAudioBuffer(audioBuffer);
-      await playAudioFromOffset(audioBuffer, 0);
+      const audio = new Audio(url);
+      audio.playbackRate = playbackSpeedRef.current;
+      audioElementRef.current = audio;
+
+      audio.onloadedmetadata = () => setAudioDuration(audio.duration);
+      audio.onended = () => {
+        setIsPlaying(false);
+        setAudioProgress(0);
+        if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+      };
+
+      await audio.play();
+      setIsPlaying(true);
+      startProgressLoop();
     },
-    [playAudioFromOffset]
+    [stopAudio, startProgressLoop]
   );
 
   const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!currentAudioBuffer) return;
+    const audio = audioElementRef.current;
+    if (!audio || !audio.duration) return;
 
     const rect = e.currentTarget.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const percentage = x / rect.width;
-    const offset = percentage * currentAudioBuffer.duration;
+    const percentage = (e.clientX - rect.left) / rect.width;
+    audio.currentTime = percentage * audio.duration;
+    setAudioProgress(percentage * 100);
 
-    playAudioFromOffset(currentAudioBuffer, offset);
+    if (audio.paused) {
+      audio.play();
+      setIsPlaying(true);
+      startProgressLoop();
+    }
   };
 
   const handleSpeedChange = (speed: number) => {
     setPlaybackSpeed(speed);
     playbackSpeedRef.current = speed;
-    if (audioSourceRef.current) {
-      audioSourceRef.current.playbackRate.value = speed;
-    }
+    if (audioElementRef.current) audioElementRef.current.playbackRate = speed;
   };
 
   const handleGenerateAudio = async (textToSpeak?: string) => {
@@ -349,6 +320,61 @@ export default function FluentFlowApp() {
       setError('Analysis failed. Please try again.');
     } finally {
       setIsAnalyzing(false);
+    }
+  };
+
+  const handlePlayVocabWord = async (word: string) => {
+    // Stop any currently playing vocab word
+    if (vocabAudioSourceRef.current) {
+      try { vocabAudioSourceRef.current.stop(); } catch { /* already stopped */ }
+      vocabAudioSourceRef.current = null;
+    }
+    if (playingVocabWord === word) {
+      setPlayingVocabWord(null);
+      return;
+    }
+
+    setLoadingVocabWord(word);
+    setPlayingVocabWord(null);
+
+    try {
+      const res = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: word, voice: selectedVoice }),
+      });
+      if (!res.ok) throw new Error('TTS failed');
+      const { audioData, mimeType } = await res.json();
+
+      const rateMatch = mimeType.match(/rate=(\d+)/);
+      const sampleRate = rateMatch ? parseInt(rateMatch[1], 10) : 24000;
+      const pcmBuffer = base64ToArrayBuffer(audioData);
+      const pcm16 = new Int16Array(pcmBuffer);
+      const wavBlob = pcmToWav(pcm16, sampleRate);
+
+      if (!vocabAudioContextRef.current) {
+        vocabAudioContextRef.current = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+      }
+      const ctx = vocabAudioContextRef.current;
+      await ctx.resume();
+      const arrayBuffer = await wavBlob.arrayBuffer();
+      const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+
+      const source = ctx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(ctx.destination);
+      source.start();
+      vocabAudioSourceRef.current = source;
+      setPlayingVocabWord(word);
+
+      source.onended = () => {
+        setPlayingVocabWord(null);
+        vocabAudioSourceRef.current = null;
+      };
+    } catch {
+      setError('Could not play pronunciation.');
+    } finally {
+      setLoadingVocabWord(null);
     }
   };
 
@@ -599,21 +625,29 @@ export default function FluentFlowApp() {
                         Key Vocabulary
                       </h3>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        {analysisResult?.vocabulary.map((item, idx) => (
+                        {analysisResult?.vocabulary?.map((item, idx) => (
                           <motion.div
                             key={idx}
                             initial={{ opacity: 0, scale: 0.95 }}
                             animate={{ opacity: 1, scale: 1 }}
-                            transition={{ delay: idx * 0.1 }}
+                            transition={{ delay: Math.min(idx * 0.05, 0.4) }}
                             className="bg-white rounded-xl p-5 border border-slate-200 hover:border-indigo-300 transition-colors group"
                           >
                             <div className="flex items-center justify-between mb-2">
                               <h4 className="font-bold text-indigo-600 text-lg">{item.word}</h4>
                               <button
-                                onClick={() => handleGenerateAudio(item.word)}
-                                className="p-2 bg-slate-50 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 transition-all"
+                                onClick={() => handlePlayVocabWord(item.word)}
+                                className={cn(
+                                  'p-2 rounded-lg transition-all',
+                                  playingVocabWord === item.word
+                                    ? 'bg-indigo-100 text-indigo-600'
+                                    : 'bg-slate-50 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50'
+                                )}
+                                title={playingVocabWord === item.word ? 'Stop' : 'Pronounce'}
                               >
-                                <Volume2 className="w-4 h-4" />
+                                {loadingVocabWord === item.word
+                                  ? <Loader2 className="w-4 h-4 animate-spin" />
+                                  : <Volume2 className="w-4 h-4" />}
                               </button>
                             </div>
                             <p className="text-sm text-slate-600 mb-3 font-medium">{item.definition}</p>
@@ -730,11 +764,9 @@ export default function FluentFlowApp() {
               </div>
               <div className="flex justify-between text-[10px] font-mono text-slate-500">
                 <span>
-                  {currentAudioBuffer
-                    ? formatTime((audioProgress / 100) * currentAudioBuffer.duration)
-                    : '00:00'}
+                  {audioDuration ? formatTime((audioProgress / 100) * audioDuration) : '00:00'}
                 </span>
-                <span>{currentAudioBuffer ? formatTime(currentAudioBuffer.duration) : 'Studio Mode'}</span>
+                <span>{audioDuration ? formatTime(audioDuration) : 'Studio Mode'}</span>
               </div>
             </div>
 
@@ -772,7 +804,10 @@ export default function FluentFlowApp() {
             {/* Controls */}
             <div className="flex items-center justify-center gap-6">
               <button
-                onClick={() => setAudioProgress(0)}
+                onClick={() => {
+                  if (audioElementRef.current) audioElementRef.current.currentTime = 0;
+                  setAudioProgress(0);
+                }}
                 className="p-3 text-slate-400 hover:text-white transition-colors"
                 title="Reset"
               >
@@ -781,13 +816,15 @@ export default function FluentFlowApp() {
 
               <button
                 onClick={() => {
+                  const audio = audioElementRef.current;
                   if (isPlaying) {
-                    stopAudio(false);
-                  } else if (currentAudioBuffer) {
-                    playAudioFromOffset(
-                      currentAudioBuffer,
-                      (audioProgress / 100) * currentAudioBuffer.duration
-                    );
+                    audio?.pause();
+                    setIsPlaying(false);
+                    if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+                  } else if (audio?.src) {
+                    audio.play();
+                    setIsPlaying(true);
+                    startProgressLoop();
                   } else {
                     handleGenerateAudio();
                   }
