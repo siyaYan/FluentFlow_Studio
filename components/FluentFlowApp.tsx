@@ -19,11 +19,11 @@ import {
   ChevronRight,
   RotateCcw,
   Settings,
-  Mic2,
   GraduationCap,
   MessageSquareQuote,
   Loader2,
   Shuffle,
+  X,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -76,7 +76,16 @@ interface VocabularyItem {
 
 interface LearningExercise {
   takeaway: string;
-  questions: string[];
+  questions: PracticeQuestion[];
+}
+
+interface PracticeQuestion {
+  prompt: string;
+  focusWord: string;
+  type: 'multiple_choice' | 'true_false';
+  options: string[];
+  correctAnswer: string;
+  explanation: string;
 }
 
 interface AnalysisResult {
@@ -84,6 +93,25 @@ interface AnalysisResult {
   vocabulary: VocabularyItem[];
   learningExercises: LearningExercise[];
 }
+
+type PracticeFocus = 'vocabulary' | 'balanced';
+type AnalysisLandingTab = 'analysis' | 'practice';
+
+interface AppSettings {
+  autoPlayAudio: boolean;
+  analysisLandingTab: AnalysisLandingTab;
+  vocabularyTarget: 8 | 12 | 16;
+  practiceFocus: PracticeFocus;
+}
+
+const PRACTICE_OPTION_LABELS = ['A', 'B', 'C', 'D'];
+const SETTINGS_STORAGE_KEY = 'fluentflow-studio-settings';
+const DEFAULT_SETTINGS: AppSettings = {
+  autoPlayAudio: true,
+  analysisLandingTab: 'analysis',
+  vocabularyTarget: 12,
+  practiceFocus: 'vocabulary',
+};
 
 const formatTime = (seconds: number) => {
   const mins = Math.floor(seconds / 60);
@@ -159,6 +187,9 @@ export default function FluentFlowApp() {
   const [activeTab, setActiveTab] = useState<'input' | 'analysis' | 'practice'>('input');
   const [isGeneratingMaterial, setIsGeneratingMaterial] = useState(false);
   const [lastGeneratedTopic, setLastGeneratedTopic] = useState<string | null>(null);
+  const [practiceAnswers, setPracticeAnswers] = useState<Record<string, string>>({});
+  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
   // Audio Refs (main player — HTMLAudioElement for pitch-preserving speed control)
   const audioElementRef = useRef<HTMLAudioElement | null>(null);
@@ -181,6 +212,36 @@ export default function FluentFlowApp() {
     };
   }, []);
 
+  useEffect(() => {
+    try {
+      const storedSettings = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
+      if (!storedSettings) return;
+
+      const parsedSettings = JSON.parse(storedSettings) as Partial<AppSettings>;
+      setSettings({
+        autoPlayAudio:
+          typeof parsedSettings.autoPlayAudio === 'boolean'
+            ? parsedSettings.autoPlayAudio
+            : DEFAULT_SETTINGS.autoPlayAudio,
+        analysisLandingTab:
+          parsedSettings.analysisLandingTab === 'practice' ? 'practice' : DEFAULT_SETTINGS.analysisLandingTab,
+        vocabularyTarget:
+          parsedSettings.vocabularyTarget === 8 ||
+          parsedSettings.vocabularyTarget === 12 ||
+          parsedSettings.vocabularyTarget === 16
+            ? parsedSettings.vocabularyTarget
+            : DEFAULT_SETTINGS.vocabularyTarget,
+        practiceFocus: parsedSettings.practiceFocus === 'balanced' ? 'balanced' : DEFAULT_SETTINGS.practiceFocus,
+      });
+    } catch {
+      window.localStorage.removeItem(SETTINGS_STORAGE_KEY);
+    }
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+  }, [settings]);
+
   const stopAudio = useCallback((resetProgress = true) => {
     if (audioElementRef.current) {
       audioElementRef.current.pause();
@@ -202,8 +263,8 @@ export default function FluentFlowApp() {
     animationFrameRef.current = requestAnimationFrame(tick);
   }, []);
 
-  const playAudio = useCallback(
-    async (blob: Blob) => {
+  const loadAudio = useCallback(
+    async (blob: Blob, autoPlay = true) => {
       stopAudio();
       if (audioBlobUrlRef.current) URL.revokeObjectURL(audioBlobUrlRef.current);
 
@@ -220,6 +281,12 @@ export default function FluentFlowApp() {
         setAudioProgress(0);
         if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
       };
+
+      if (!autoPlay) {
+        setIsPlaying(false);
+        setAudioProgress(0);
+        return;
+      }
 
       await audio.play();
       setIsPlaying(true);
@@ -280,7 +347,7 @@ export default function FluentFlowApp() {
       const pcm16 = new Int16Array(pcmDataBuffer);
       const wavBlob = pcmToWav(pcm16, sampleRate);
 
-      await playAudio(wavBlob);
+      await loadAudio(wavBlob, settings.autoPlayAudio);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'An error occurred during audio generation.';
       console.error(err);
@@ -306,7 +373,13 @@ export default function FluentFlowApp() {
       const res = await fetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: textInput, level: selectedLevel, levelName }),
+        body: JSON.stringify({
+          text: textInput,
+          level: selectedLevel,
+          levelName,
+          vocabularyTarget: settings.vocabularyTarget,
+          practiceFocus: settings.practiceFocus,
+        }),
       });
 
       if (!res.ok) {
@@ -316,6 +389,8 @@ export default function FluentFlowApp() {
 
       const result = await res.json();
       setAnalysisResult(result);
+      setPracticeAnswers({});
+      setActiveTab(settings.analysisLandingTab);
     } catch (err: unknown) {
       console.error(err);
       setError('Analysis failed. Please try again.');
@@ -402,6 +477,7 @@ export default function FluentFlowApp() {
       setTextInput(text);
       setLastGeneratedTopic(topic);
       setAnalysisResult(null);
+      setPracticeAnswers({});
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Failed to generate material.';
       setError(message);
@@ -409,6 +485,31 @@ export default function FluentFlowApp() {
       setIsGeneratingMaterial(false);
     }
   };
+
+  const handlePracticeAnswer = (questionKey: string, answer: string) => {
+    setPracticeAnswers((current) => ({
+      ...current,
+      [questionKey]: answer,
+    }));
+  };
+
+  const practiceQuestions = analysisResult?.learningExercises.flatMap((exercise, sectionIndex) =>
+    exercise.questions.map((question, questionIndex) => ({
+      ...question,
+      key: `${sectionIndex}-${questionIndex}`,
+    }))
+  ) ?? [];
+
+  const answeredQuestions = practiceQuestions.filter((question) => practiceAnswers[question.key]).length;
+  const correctAnswers = practiceQuestions.filter(
+    (question) => practiceAnswers[question.key] && practiceAnswers[question.key] === question.correctAnswer
+  ).length;
+  const vocabularyTargetLabel =
+    settings.vocabularyTarget === 8
+      ? 'Essentials'
+      : settings.vocabularyTarget === 16
+        ? 'Deep Dive'
+        : 'Balanced';
 
   return (
     <div className="min-h-screen bg-[#F8FAFC] text-[#1E293B] font-sans selection:bg-indigo-100 selection:text-indigo-900">
@@ -419,18 +520,253 @@ export default function FluentFlowApp() {
             <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center shadow-indigo-200 shadow-lg">
               <GraduationCap className="text-white w-6 h-6" />
             </div>
-            <h1 className="text-xl font-bold tracking-tight text-slate-900">
-              FluentFlow <span className="text-indigo-600">Studio</span>
-            </h1>
+            <div>
+              <h1 className="text-xl font-bold tracking-tight text-slate-900">
+                FluentFlow <span className="text-indigo-600">Studio</span>
+              </h1>
+              <div className="hidden md:flex items-center gap-2 mt-1">
+                <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[10px] font-bold uppercase tracking-widest">
+                  {vocabularyTargetLabel} Vocab
+                </span>
+                <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[10px] font-bold uppercase tracking-widest">
+                  {settings.practiceFocus === 'balanced' ? 'Balanced Check' : 'Vocab Check'}
+                </span>
+                <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[10px] font-bold uppercase tracking-widest">
+                  {settings.analysisLandingTab === 'practice' ? 'Open Practice' : 'Open Analysis'}
+                </span>
+              </div>
+            </div>
           </div>
 
           <div className="flex items-center gap-4">
-            <button className="p-2 text-slate-400 hover:text-slate-600 transition-colors">
+            <button
+              onClick={() => setIsSettingsOpen(true)}
+              className="p-2 text-slate-400 hover:text-slate-600 transition-colors"
+              title="Open study settings"
+              aria-label="Open study settings"
+            >
               <Settings className="w-5 h-5" />
             </button>
           </div>
         </div>
       </header>
+
+      <AnimatePresence>
+        {isSettingsOpen && (
+          <>
+            <motion.button
+              type="button"
+              aria-label="Close settings"
+              className="fixed inset-0 z-40 bg-slate-900/35 backdrop-blur-sm"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsSettingsOpen(false)}
+            />
+            <motion.aside
+              initial={{ opacity: 0, x: 24 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 24 }}
+              className="fixed right-4 top-20 z-50 w-[calc(100%-2rem)] max-w-md rounded-3xl border border-slate-200 bg-white shadow-2xl shadow-slate-300/30"
+            >
+              <div className="flex items-start justify-between gap-4 border-b border-slate-200 px-6 py-5">
+                <div>
+                  <p className="text-[10px] font-bold uppercase tracking-[0.25em] text-indigo-500">Study Settings</p>
+                  <h2 className="mt-2 text-xl font-bold text-slate-900">Make the app work your way</h2>
+                  <p className="mt-1 text-sm text-slate-500">
+                    These preferences are saved on this device and used for the next analysis run.
+                  </p>
+                </div>
+                <button
+                  onClick={() => setIsSettingsOpen(false)}
+                  className="rounded-full p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+                  aria-label="Close settings panel"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              <div className="space-y-6 px-6 py-6">
+                <section className="space-y-3">
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900">Audio playback</h3>
+                    <p className="text-xs text-slate-500">Choose what happens after text-to-speech finishes generating.</p>
+                  </div>
+                  <button
+                    onClick={() =>
+                      setSettings((current) => ({
+                        ...current,
+                        autoPlayAudio: !current.autoPlayAudio,
+                      }))
+                    }
+                    className={cn(
+                      'flex w-full items-center justify-between rounded-2xl border px-4 py-3 text-left transition-all',
+                      settings.autoPlayAudio
+                        ? 'border-indigo-300 bg-indigo-50'
+                        : 'border-slate-200 bg-white hover:border-slate-300'
+                    )}
+                  >
+                    <div>
+                      <p className="text-sm font-semibold text-slate-900">Autoplay generated audio</p>
+                      <p className="text-xs text-slate-500">
+                        {settings.autoPlayAudio
+                          ? 'Audio starts as soon as it is ready.'
+                          : 'Audio is prepared and waits for manual play.'}
+                      </p>
+                    </div>
+                    <span
+                      className={cn(
+                        'rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-widest',
+                        settings.autoPlayAudio ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-500'
+                      )}
+                    >
+                      {settings.autoPlayAudio ? 'On' : 'Off'}
+                    </span>
+                  </button>
+                </section>
+
+                <section className="space-y-3">
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900">After analysis</h3>
+                    <p className="text-xs text-slate-500">Choose which tab opens automatically once results are ready.</p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {(['analysis', 'practice'] as const).map((tab) => (
+                      <button
+                        key={tab}
+                        onClick={() =>
+                          setSettings((current) => ({
+                            ...current,
+                            analysisLandingTab: tab,
+                          }))
+                        }
+                        className={cn(
+                          'rounded-2xl border px-4 py-3 text-left transition-all',
+                          settings.analysisLandingTab === tab
+                            ? 'border-indigo-600 bg-indigo-600 text-white'
+                            : 'border-slate-200 bg-white text-slate-600 hover:border-indigo-300'
+                        )}
+                      >
+                        <p className="text-sm font-semibold capitalize">{tab}</p>
+                        <p
+                          className={cn(
+                            'mt-1 text-xs',
+                            settings.analysisLandingTab === tab ? 'text-indigo-100' : 'text-slate-400'
+                          )}
+                        >
+                          {tab === 'analysis' ? 'Read the summary and vocab first.' : 'Jump straight into the check.'}
+                        </p>
+                      </button>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="space-y-3">
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900">Vocabulary list size</h3>
+                    <p className="text-xs text-slate-500">Control how many challenging words the AI should keep.</p>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    {[
+                      { value: 8 as const, label: 'Essentials', hint: 'Small set' },
+                      { value: 12 as const, label: 'Balanced', hint: 'Default' },
+                      { value: 16 as const, label: 'Deep Dive', hint: 'More coverage' },
+                    ].map((option) => (
+                      <button
+                        key={option.value}
+                        onClick={() =>
+                          setSettings((current) => ({
+                            ...current,
+                            vocabularyTarget: option.value,
+                          }))
+                        }
+                        className={cn(
+                          'rounded-2xl border px-3 py-3 text-left transition-all',
+                          settings.vocabularyTarget === option.value
+                            ? 'border-slate-900 bg-slate-900 text-white'
+                            : 'border-slate-200 bg-white text-slate-600 hover:border-slate-400'
+                        )}
+                      >
+                        <p className="text-sm font-semibold">{option.label}</p>
+                        <p
+                          className={cn(
+                            'mt-1 text-xs',
+                            settings.vocabularyTarget === option.value ? 'text-slate-300' : 'text-slate-400'
+                          )}
+                        >
+                          {option.hint}
+                        </p>
+                      </button>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="space-y-3">
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900">Understanding check style</h3>
+                    <p className="text-xs text-slate-500">Tune how vocabulary-heavy the short quiz should be.</p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      {
+                        value: 'vocabulary' as const,
+                        label: 'Vocab-first',
+                        hint: 'Mostly word and phrase meaning.',
+                      },
+                      {
+                        value: 'balanced' as const,
+                        label: 'Balanced',
+                        hint: 'Mix vocab with a little gist checking.',
+                      },
+                    ].map((option) => (
+                      <button
+                        key={option.value}
+                        onClick={() =>
+                          setSettings((current) => ({
+                            ...current,
+                            practiceFocus: option.value,
+                          }))
+                        }
+                        className={cn(
+                          'rounded-2xl border px-4 py-3 text-left transition-all',
+                          settings.practiceFocus === option.value
+                            ? 'border-emerald-500 bg-emerald-50 text-emerald-900'
+                            : 'border-slate-200 bg-white text-slate-600 hover:border-emerald-300'
+                        )}
+                      >
+                        <p className="text-sm font-semibold">{option.label}</p>
+                        <p
+                          className={cn(
+                            'mt-1 text-xs',
+                            settings.practiceFocus === option.value ? 'text-emerald-700' : 'text-slate-400'
+                          )}
+                        >
+                          {option.hint}
+                        </p>
+                      </button>
+                    ))}
+                  </div>
+                </section>
+              </div>
+
+              <div className="flex items-center justify-between gap-3 border-t border-slate-200 px-6 py-4">
+                <button
+                  onClick={() => setSettings(DEFAULT_SETTINGS)}
+                  className="text-xs font-bold uppercase tracking-widest text-slate-400 transition-colors hover:text-slate-700"
+                >
+                  Reset defaults
+                </button>
+                <button
+                  onClick={() => setIsSettingsOpen(false)}
+                  className="rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-slate-800"
+                >
+                  Done
+                </button>
+              </div>
+            </motion.aside>
+          </>
+        )}
+      </AnimatePresence>
 
       <main className="max-w-6xl mx-auto px-6 py-8 grid grid-cols-1 lg:grid-cols-12 gap-8">
         {/* Left Column: Input & Controls */}
@@ -686,6 +1022,31 @@ export default function FluentFlowApp() {
                   </div>
                 ) : (
                   <div className="space-y-6">
+                    <div className="bg-slate-900 rounded-2xl p-5 text-white flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                      <div>
+                        <p className="text-[10px] uppercase tracking-[0.25em] text-indigo-200 font-bold">
+                          Understanding Check
+                        </p>
+                        <h3 className="text-lg font-bold mt-1">Brief vocabulary check</h3>
+                        <p className="text-sm text-slate-300 mt-1">
+                          A short quiz to confirm general meaning, with most questions focused on vocabulary in context.
+                        </p>
+                      </div>
+                      <div className="flex gap-3">
+                        <div className="min-w-[96px] rounded-xl bg-white/10 px-4 py-3">
+                          <p className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">Answered</p>
+                          <p className="text-2xl font-bold mt-1">
+                            {answeredQuestions}
+                            <span className="text-sm text-slate-400">/{practiceQuestions.length}</span>
+                          </p>
+                        </div>
+                        <div className="min-w-[96px] rounded-xl bg-emerald-400/15 px-4 py-3">
+                          <p className="text-[10px] uppercase tracking-widest text-emerald-200 font-bold">Correct</p>
+                          <p className="text-2xl font-bold mt-1 text-emerald-300">{correctAnswers}</p>
+                        </div>
+                      </div>
+                    </div>
+
                     {analysisResult.learningExercises.map((ex, idx) => (
                       <div key={idx} className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
                         <div className="bg-indigo-600 p-4">
@@ -697,28 +1058,111 @@ export default function FluentFlowApp() {
                           </h4>
                         </div>
                         <div className="p-6 space-y-4">
-                          {ex.questions.map((q, qIdx) => (
-                            <div
-                              key={qIdx}
-                              className="group flex items-start gap-4 p-4 rounded-xl hover:bg-slate-50 transition-colors border border-transparent hover:border-slate-200"
-                            >
-                              <div className="w-8 h-8 bg-slate-100 rounded-lg flex items-center justify-center text-slate-400 group-hover:bg-indigo-100 group-hover:text-indigo-600 transition-colors shrink-0">
-                                <Mic2 className="w-4 h-4" />
-                              </div>
-                              <div className="space-y-3 flex-1">
-                                <p className="text-slate-700 font-medium leading-relaxed">{q}</p>
-                                <div className="flex items-center gap-3">
-                                  <button className="text-[10px] font-bold uppercase tracking-widest text-indigo-600 hover:text-indigo-800">
-                                    Record Answer
-                                  </button>
-                                  <span className="text-slate-300">|</span>
-                                  <button className="text-[10px] font-bold uppercase tracking-widest text-slate-400 hover:text-slate-600">
-                                    See Model Answer
-                                  </button>
+                          {ex.questions.map((question, qIdx) => {
+                            const questionKey = `${idx}-${qIdx}`;
+                            const selectedAnswer = practiceAnswers[questionKey];
+                            const hasInteractiveOptions = question.options.length > 0 && Boolean(question.correctAnswer);
+                            const isCorrect = selectedAnswer === question.correctAnswer;
+
+                            return (
+                              <div
+                                key={qIdx}
+                                className="p-4 rounded-xl border border-slate-200 bg-slate-50/60 space-y-4"
+                              >
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="space-y-2 flex-1">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      {question.focusWord && (
+                                        <span className="inline-flex items-center rounded-full bg-amber-100 px-2.5 py-1 text-[10px] font-bold uppercase tracking-widest text-amber-700">
+                                          Focus Word: {question.focusWord}
+                                        </span>
+                                      )}
+                                      <span className="inline-flex items-center rounded-full bg-indigo-100 px-2.5 py-1 text-[10px] font-bold uppercase tracking-widest text-indigo-700">
+                                        {question.type === 'true_false' ? 'True / False' : 'Multiple Choice'}
+                                      </span>
+                                      <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                                        Question {qIdx + 1}
+                                      </span>
+                                    </div>
+                                    <p className="text-slate-800 font-medium leading-relaxed">{question.prompt}</p>
+                                  </div>
+                                  {selectedAnswer && (
+                                    <div
+                                      className={cn(
+                                        'shrink-0 rounded-full px-3 py-1 text-[10px] font-bold uppercase tracking-widest',
+                                        isCorrect
+                                          ? 'bg-emerald-100 text-emerald-700'
+                                          : 'bg-rose-100 text-rose-700'
+                                      )}
+                                    >
+                                      {isCorrect ? 'Correct' : 'Try Again'}
+                                    </div>
+                                  )}
                                 </div>
+
+                                {hasInteractiveOptions ? (
+                                  <div className="grid grid-cols-1 gap-3">
+                                    {question.options.map((option, optionIndex) => {
+                                      const isSelected = selectedAnswer === option;
+                                      const isCorrectOption = option === question.correctAnswer;
+                                      const revealAnswer = Boolean(selectedAnswer);
+
+                                      return (
+                                        <button
+                                          key={option}
+                                          onClick={() => handlePracticeAnswer(questionKey, option)}
+                                          className={cn(
+                                            'w-full rounded-xl border px-4 py-3 text-left transition-all',
+                                            !revealAnswer && 'border-slate-200 bg-white hover:border-indigo-300 hover:bg-indigo-50',
+                                            revealAnswer && isCorrectOption && 'border-emerald-400 bg-emerald-50 text-emerald-900',
+                                            revealAnswer && isSelected && !isCorrectOption && 'border-rose-300 bg-rose-50 text-rose-900',
+                                            revealAnswer && !isSelected && !isCorrectOption && 'border-slate-200 bg-white text-slate-500'
+                                          )}
+                                        >
+                                          <span className="flex items-start gap-3">
+                                            <span
+                                              className={cn(
+                                                'mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold',
+                                                revealAnswer && isCorrectOption
+                                                  ? 'bg-emerald-600 text-white'
+                                                  : revealAnswer && isSelected
+                                                    ? 'bg-rose-600 text-white'
+                                                    : 'bg-slate-100 text-slate-500'
+                                              )}
+                                            >
+                                              {PRACTICE_OPTION_LABELS[optionIndex] ?? optionIndex + 1}
+                                            </span>
+                                            <span className="text-sm font-medium leading-relaxed">{option}</span>
+                                          </span>
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                ) : (
+                                  <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                                    This question came back without answer choices. Run analysis again to generate the
+                                    interactive version.
+                                  </div>
+                                )}
+
+                                {selectedAnswer && question.explanation && (
+                                  <div
+                                    className={cn(
+                                      'rounded-xl border px-4 py-3 text-sm',
+                                      isCorrect
+                                        ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+                                        : 'border-rose-200 bg-rose-50 text-rose-900'
+                                    )}
+                                  >
+                                    <p className="font-bold uppercase tracking-widest text-[10px] mb-1">
+                                      {isCorrect ? 'Why this is right' : `Correct answer: ${question.correctAnswer}`}
+                                    </p>
+                                    <p className="leading-relaxed">{question.explanation}</p>
+                                  </div>
+                                )}
                               </div>
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       </div>
                     ))}
@@ -864,7 +1308,7 @@ export default function FluentFlowApp() {
             <ul className="space-y-3">
               {[
                 'Listen to the text at least 3 times to catch subtle pronunciations.',
-                'Use the practice questions to record yourself speaking.',
+                'Use the practice quiz to check meaning before replaying the passage.',
                 'Focus on the key vocabulary in your next conversation.',
               ].map((tip, i) => (
                 <li key={i} className="flex gap-3 text-sm text-slate-600">
