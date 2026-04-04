@@ -13,11 +13,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Server misconfiguration: missing API key.' }, { status: 500 });
   }
 
+  const model = process.env.GEMINI_MODEL ?? 'gemini-3-flash-preview';
+
   const ai = new GoogleGenAI({ apiKey });
 
   try {
     const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
+      model,
       contents: [
         {
           parts: [
